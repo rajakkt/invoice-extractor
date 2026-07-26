@@ -15,6 +15,13 @@ const SYSTEM_PROMPT = `You are an invoice data extraction assistant.
 Extract structured data from the invoice text provided by the user.
 Return ONLY valid JSON matching this exact schema. Use null for missing fields.
 
+CRITICAL RULES FOR AMOUNTS:
+- Sum all line items first (quantity * unitPrice for each line)
+- Use that as subtotal if shown subtotal seems inconsistent
+- totalAmount should be: subtotal + tax + shipping
+- For amounts: extract the numeric value only (e.g., "2101.22" not "2,101.22")
+- If field is null or empty, confidence MUST be "low"
+
 CRITICAL RULES FOR CONFIDENCE SCORING:
 - If a field value is null or empty string, its _confidence MUST be "low" (not "high" or "medium")
 - "high"   : field was clearly found, not empty, and unambiguous

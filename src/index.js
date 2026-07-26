@@ -16,6 +16,17 @@ const SUMMARIES_DIR = path.join(__dirname, "..", "output", "daily_summaries");
 const shouldValidate = process.argv.includes("--validate");
 if (shouldValidate) console.log("✓ Validation enabled\n");
 
+// Get critical fields from .env or use defaults
+const criticalFieldsEnv = process.env.CRITICAL_CONFIDENCE_FIELDS || "invoiceNumber,totalAmount,vendor";
+const CRITICAL_CONFIDENCE_FIELDS = criticalFieldsEnv
+  .split(",")
+  .map(f => f.trim())
+  .filter(f => f.length > 0);
+
+if (CRITICAL_CONFIDENCE_FIELDS.length === 0) {
+  console.log("⚠ No critical confidence fields configured. All invoices will be processed without confidence checks.\n");
+}
+
 // Ensure all directories exist
 function ensureDirectoriesExist() {
   [INPUT_DIR, PROCESSED_DIR, REVIEW_DIR, VALIDATION_FAILED_DIR, SUMMARIES_DIR].forEach(dir => {
@@ -30,10 +41,17 @@ function getTodayDateString() {
   return now.toISOString().split("T")[0];
 }
 
-function isCriticalFieldHighConfidence(data) {
-  const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
-  for (const [field, confidence] of confidenceFields) {
-    if (confidence !== "high") return false;
+function isCriticalFieldsHighConfidence(data) {
+  // If no critical fields defined, always return true (accept all)
+  if (CRITICAL_CONFIDENCE_FIELDS.length === 0) return true;
+
+  for (const fieldName of CRITICAL_CONFIDENCE_FIELDS) {
+    const confidenceField = `${fieldName}_confidence`;
+    const confidence = data[confidenceField];
+    
+    if (confidence !== "high") {
+      return false;
+    }
   }
   return true;
 }
@@ -42,10 +60,11 @@ function createReviewNote(data, reason = "confidence") {
   const issues = [];
   
   if (reason === "confidence") {
-    const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
-    for (const [field, confidence] of confidenceFields) {
+    for (const fieldName of CRITICAL_CONFIDENCE_FIELDS) {
+      const confidenceField = `${fieldName}_confidence`;
+      const confidence = data[confidenceField];
+      
       if (confidence !== "high") {
-        const fieldName = field.replace("_confidence", "");
         issues.push(`  ⚠ ${fieldName}: ${confidence} confidence`);
       }
     }
@@ -60,7 +79,7 @@ function createReviewNote(data, reason = "confidence") {
 =====================================
 Invoice #: ${data.invoiceNumber}
 Date: ${new Date().toISOString()}
-Reason: ${reason === "confidence" ? "Low Confidence Fields" : "Validation Failed"}
+Reason: ${reason === "confidence" ? "Low Confidence on Critical Fields" : "Validation Failed"}
 
 Issues Found:
 ${issues.join("\n")}
@@ -82,8 +101,8 @@ async function processInvoice(filePath, runResults) {
 
     const data = await extractInvoiceData(pdfText);
 
-    // Check confidence
-    const isHighConfidence = isCriticalFieldHighConfidence(data);
+    // Check critical fields confidence
+    const isHighConfidence = isCriticalFieldsHighConfidence(data);
 
     // Check validation if enabled
     let validationResult = null;

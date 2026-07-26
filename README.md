@@ -6,8 +6,9 @@ AI-powered invoice PDF extractor using GitHub Models (gpt-4o-mini). Extracts str
 
 - **AI-Powered Extraction**: Uses GPT-4o-mini to intelligently extract invoice data from any PDF format
 - **Confidence Scoring**: Each extracted field gets a confidence rating (high/medium/low)
-- **Smart Routing**: Automatically sorts invoices to `processed/` (high confidence) or `needs_review/` (any field not high confidence)
-- **Amount Validation**: Optional validation checks for invoice math, ranges, and consistency
+- **Configurable Critical Fields**: Choose which fields must be "high" confidence to route to processed/
+- **Smart Routing**: Automatically sorts invoices based on critical field confidence
+- **Amount Validation**: Optional validation checks for invoice math, ranges, and consistency (--validate flag)
 - **Daily Summaries**: Generates timestamped CSV reports for each processing run
 - **No Database Required**: File-based workflow using folder structure for state management
 - **Audit Trail**: PDF + JSON pairs saved together, REVIEW_NOTE.txt for flagged invoices
@@ -32,10 +33,11 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env` and add your GitHub token:
+Edit `.env` and add your GitHub token and critical fields:
 
 ```env
 GITHUB_TOKEN=github_pat_...your_token_here...
+CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,totalAmount,vendor
 ```
 
 **How to get your GitHub token:**
@@ -45,6 +47,30 @@ GITHUB_TOKEN=github_pat_...your_token_here...
 4. Check the `models` scope under "Permissions"
 5. Generate and copy the token
 6. Paste into `.env`
+
+## Configuration
+
+### Critical Confidence Fields
+
+The `CRITICAL_CONFIDENCE_FIELDS` setting controls which fields must have "high" confidence for an invoice to go to the `processed/` folder. If ANY critical field has "medium" or "low" confidence, the invoice goes to `needs_review/`.
+
+**Examples:**
+
+```env
+# Only check these 3 fields (most lenient)
+CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,totalAmount,vendor
+
+# Require PO number too (stricter)
+CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,totalAmount,vendor,purchaseOrderNumber
+
+# Check everything (most strict)
+CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,invoiceDate,dueDate,vendor,purchaseOrderNumber,totalAmount,subtotal
+
+# Leave empty to accept all invoices (no confidence checking)
+CRITICAL_CONFIDENCE_FIELDS=
+```
+
+**Default:** `invoiceNumber,totalAmount,vendor` (when not specified)
 
 ## Usage
 
@@ -57,11 +83,12 @@ npm start
 **What happens:**
 1. Reads all PDFs from `input/` folder
 2. Extracts structured data using AI
-3. Routes invoices based on confidence:
-   - **High confidence** → `output/processed/`
-   - **Any field not high** → `output/needs_review/`
-4. Generates daily CSV summary: `output/daily_summaries/invoices_YYYY-MM-DD.csv`
-5. Deletes processed PDFs from `input/`
+3. Checks critical fields against configured list
+4. Routes invoices based on confidence:
+   - **All critical fields "high"** → `output/processed/`
+   - **Any critical field not "high"** → `output/needs_review/`
+5. Generates daily CSV summary: `output/daily_summaries/invoices_YYYY-MM-DD.csv`
+6. Deletes processed PDFs from `input/`
 
 ### Run with Validation
 
@@ -87,7 +114,7 @@ invoice-extractor/
     │   +-- invoice2.pdf
     │   +-- invoice2.json
     │
-    +-- needs_review/               ⚠ Manual review needed (low confidence)
+    +-- needs_review/               ⚠ Manual review needed (critical field low confidence)
     │   +-- invoice3.pdf
     │   +-- invoice3.json
     │   +-- invoice3_REVIEW_NOTE.txt (explains issues)
@@ -154,12 +181,16 @@ Each invoice JSON contains:
   "subtotal": 1000.00,
   "subtotal_confidence": "high",
   "tax": 0.00,
+  "tax_confidence": "high",
   "shippingCost": 0.00,
+  "shippingCost_confidence": "high",
   "totalAmount": 1000.00,
   "totalAmount_confidence": "high",
   
   "trackingNumber": "123456789",
+  "trackingNumber_confidence": "high",
   "carrier": "FedEx",
+  "carrier_confidence": "high",
   
   "needsHumanReview": false,
   "reviewReason": null
@@ -172,14 +203,27 @@ The AI evaluates each field and assigns a confidence level:
 
 | Level | Meaning |
 |---|---|
-| **high** | Field was clearly found and unambiguous |
+| **high** | Field was clearly found, not empty, and unambiguous |
 | **medium** | Field was inferred or partially matched |
-| **low** | Field was guessed, missing, or unclear |
+| **low** | Field is missing, null, empty, or could not be found |
 
 ### Routing Rules
 
-- **ALL fields must be "high"** → `processed/` folder
-- **ANY field is "medium" or "low"** → `needs_review/` folder + REVIEW_NOTE.txt
+Only **critical fields** (from `CRITICAL_CONFIDENCE_FIELDS`) affect routing:
+- **ALL critical fields = "high"** → `processed/` folder
+- **ANY critical field ≠ "high"** → `needs_review/` folder + REVIEW_NOTE.txt
+- **Non-critical fields** can have any confidence level without affecting routing
+
+**Example:**
+```env
+CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,totalAmount,vendor
+```
+
+In this case:
+- ✅ Missing PO number? Still goes to `processed/` (not critical)
+- ✅ Empty tax field? Still goes to `processed/` (not critical)
+- ❌ Missing vendor? Goes to `needs_review/` (is critical)
+- ❌ Unclear total amount? Goes to `needs_review/` (is critical)
 
 ## Amount Validation (Optional)
 
@@ -237,8 +281,8 @@ The CSV includes all invoices processed that day:
 
 ```csv
 fileName,invoiceNumber,invoiceDate,dueDate,paymentTerms,vendorName,...,invoiceNumber_confidence,totalAmount_confidence,vendor_confidence,...,validationPassed,status
-invoice1.pdf,20031881,17-APR-2025,17-MAY-2025,Net 30,BRANSON CORP,...,high,high,high,...,true,processed
-invoice2.pdf,US689178,09-Jun-2025,16-Jul-2025,Net 30,Tektronix Inc,...,high,high,high,...,true,processed
+invoice1.pdf,20031881,17-APR-2025,17-MAY-2025,Net 30,BRANSON CORP,...,high,high,high,...,n/a,processed
+invoice2.pdf,US689178,09-Jun-2025,16-Jul-2025,Net 30,Tektronix Inc,...,high,high,high,...,n/a,processed
 ```
 
 Columns include:
@@ -247,23 +291,23 @@ Columns include:
 
 Useful for:
 - Daily audit trails
-- Tracking extraction and validation success rates
+- Tracking extraction success rates
 - Reconciliation with ERP uploads
 
 ## Handling Needs Review
 
-Invoices in `needs_review/` contain a `REVIEW_NOTE.txt` file:
+Invoices in `needs_review/` contain a `REVIEW_NOTE.txt` file explaining which critical fields failed:
 
 ```
 INVOICE FLAGGED FOR REVIEW
 =====================================
 Invoice #: US689178
 Date: 2026-07-26T16:00:00Z
-Reason: Low Confidence Fields
+Reason: Low Confidence on Critical Fields
 
 Issues Found:
   ⚠ purchaseOrderNumber: low confidence
-  📝 Note: Purchase Order Number is missing from invoice.
+  📝 Note: purchaseOrderNumber is missing.
 
 Next Steps:
 1. Review the JSON file for accuracy
@@ -332,9 +376,14 @@ This tool is Phase 1 (extraction). Planned:
 - PDFs >12,000 chars are automatically truncated (keeps start + end)
 - This is normal and preserves the most important data
 
-**"Validation failed but I can't see the issues"**
-- Check the VALIDATION_NOTE.txt file in the `validation_failed/` folder
-- Review the JSON file to see extracted amounts
+**"Invoices going to needs_review when I don't expect it"**
+- Check your `CRITICAL_CONFIDENCE_FIELDS` setting in `.env`
+- The invoice has low confidence on one of those critical fields
+- Review the REVIEW_NOTE.txt to see which fields failed
+
+**"How do I make validation stricter/looser"**
+- Edit `.env` and adjust `MIN_AMOUNT`, `MAX_AMOUNT`, and `TOLERANCE`
+- Or change which fields are critical in `CRITICAL_CONFIDENCE_FIELDS`
 
 ## License
 
