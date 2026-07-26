@@ -16,8 +16,16 @@ function getTodayDateString() {
 }
 
 function isCriticalFieldHighConfidence(data) {
-  const criticalFields = ["invoiceNumber_confidence", "totalAmount_confidence", "vendor_confidence"];
-  return criticalFields.every(field => data[field] === "high");
+  // Check ALL confidence fields - ANY that are not "high" means needs review
+  const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
+  
+  for (const [field, confidence] of confidenceFields) {
+    if (confidence !== "high") {
+      return false; // At least one field is not high confidence
+    }
+  }
+  
+  return true; // All fields are high confidence
 }
 
 function createReviewNote(data) {
