@@ -4,7 +4,8 @@
   "description": "AI-powered invoice PDF extractor using GitHub Models gpt-4o-mini",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "cleanup": "node src/cleanup.js"
   },
   "keywords": ["invoice", "pdf", "extraction", "gpt-4o-mini"],
   "author": "",
