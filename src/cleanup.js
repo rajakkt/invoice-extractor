@@ -5,6 +5,7 @@ const DIRS_TO_CLEAN = [
   path.join(__dirname, "..", "input"),
   path.join(__dirname, "..", "output", "processed"),
   path.join(__dirname, "..", "output", "needs_review"),
+  path.join(__dirname, "..", "output", "validation_failed"),
   path.join(__dirname, "..", "output", "daily_summaries")
 ];
 

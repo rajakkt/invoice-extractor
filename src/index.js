@@ -1,48 +1,66 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { extractText } = require("./extractPdf");
 const { extractInvoiceData } = require("./extractData");
+const { validateAmounts } = require("./validate");
 const { flattenForCsv } = require("./saveOutput");
 
 const INPUT_DIR = path.join(__dirname, "..", "input");
 const PROCESSED_DIR = path.join(__dirname, "..", "output", "processed");
 const REVIEW_DIR = path.join(__dirname, "..", "output", "needs_review");
+const VALIDATION_FAILED_DIR = path.join(__dirname, "..", "output", "validation_failed");
 const SUMMARIES_DIR = path.join(__dirname, "..", "output", "daily_summaries");
+
+// Check if --validate flag was passed
+const shouldValidate = process.argv.includes("--validate");
+if (shouldValidate) console.log("✓ Validation enabled\n");
+
+// Ensure all directories exist
+function ensureDirectoriesExist() {
+  [INPUT_DIR, PROCESSED_DIR, REVIEW_DIR, VALIDATION_FAILED_DIR, SUMMARIES_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  });
+}
 
 function getTodayDateString() {
   const now = new Date();
-  return now.toISOString().split("T")[0]; // YYYY-MM-DD
+  return now.toISOString().split("T")[0];
 }
 
 function isCriticalFieldHighConfidence(data) {
-  // Check ALL confidence fields - ANY that are not "high" means needs review
   const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
-  
   for (const [field, confidence] of confidenceFields) {
-    if (confidence !== "high") {
-      return false; // At least one field is not high confidence
-    }
+    if (confidence !== "high") return false;
   }
-  
-  return true; // All fields are high confidence
+  return true;
 }
 
-function createReviewNote(data) {
+function createReviewNote(data, reason = "confidence") {
   const issues = [];
-  const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
-  for (const [field, confidence] of confidenceFields) {
-    if (confidence !== "high") {
-      const fieldName = field.replace("_confidence", "");
-      issues.push(`  ? ${fieldName}: ${confidence} confidence`);
+  
+  if (reason === "confidence") {
+    const confidenceFields = Object.entries(data).filter(([k]) => k.endsWith("_confidence"));
+    for (const [field, confidence] of confidenceFields) {
+      if (confidence !== "high") {
+        const fieldName = field.replace("_confidence", "");
+        issues.push(`  ⚠ ${fieldName}: ${confidence} confidence`);
+      }
     }
+    if (data.reviewReason) issues.push(`  📝 Note: ${data.reviewReason}`);
+  } else if (reason === "validation") {
+    data.validationIssues?.forEach(issue => {
+      issues.push(`  ⚠ ${issue}`);
+    });
   }
-  if (data.reviewReason) issues.push(`  ?? Note: ${data.reviewReason}`);
 
   return `INVOICE FLAGGED FOR REVIEW
 =====================================
 Invoice #: ${data.invoiceNumber}
 Date: ${new Date().toISOString()}
+Reason: ${reason === "confidence" ? "Low Confidence Fields" : "Validation Failed"}
 
 Issues Found:
 ${issues.join("\n")}
@@ -64,11 +82,33 @@ async function processInvoice(filePath, runResults) {
 
     const data = await extractInvoiceData(pdfText);
 
+    // Check confidence
     const isHighConfidence = isCriticalFieldHighConfidence(data);
-    const targetDir = isHighConfidence ? PROCESSED_DIR : REVIEW_DIR;
-    const status = isHighConfidence ? "? Processed" : "??  Needs Review";
+
+    // Check validation if enabled
+    let validationResult = null;
+    if (shouldValidate && isHighConfidence) {
+      validationResult = validateAmounts(data);
+      data.validationResult = validationResult;
+    }
+
+    // Determine routing
+    let targetDir, status;
+    if (!isHighConfidence) {
+      targetDir = REVIEW_DIR;
+      status = "⚠️  Needs Review (confidence)";
+    } else if (shouldValidate && validationResult && !validationResult.valid) {
+      targetDir = VALIDATION_FAILED_DIR;
+      status = "❌ Validation Failed";
+    } else {
+      targetDir = PROCESSED_DIR;
+      status = "✅ Processed";
+    }
 
     console.log(`    Invoice #${data.invoiceNumber} | Total: ${data.currency} ${data.totalAmount} | ${status}`);
+    if (validationResult?.issues?.length > 0) {
+      validationResult.issues.forEach(issue => console.log(`      • ${issue}`));
+    }
 
     // Save JSON
     const baseName = path.basename(filePath, ".pdf");
@@ -79,24 +119,24 @@ async function processInvoice(filePath, runResults) {
     const pdfPath = path.join(targetDir, fileName);
     fs.copyFileSync(filePath, pdfPath);
 
-    // Create REVIEW_NOTE if needed
-    if (!isHighConfidence) {
+    // Create review note if needed
+    if (!isHighConfidence || (validationResult && !validationResult.valid)) {
+      const reason = !isHighConfidence ? "confidence" : "validation";
       const reviewNotePath = path.join(targetDir, `${baseName}_REVIEW_NOTE.txt`);
-      fs.writeFileSync(reviewNotePath, createReviewNote(data), "utf8");
+      fs.writeFileSync(reviewNotePath, createReviewNote(data, reason), "utf8");
     }
 
-    // Delete from input folder after successful processing
+    // Delete from input
     fs.unlinkSync(filePath);
-    console.log(`    ? Moved to ${isHighConfidence ? "processed" : "needs_review"}/ (removed from input)`);
+    console.log(`    ✓ Moved to ${path.basename(targetDir)}/ (removed from input)`);
 
-    // Track for CSV
     runResults.push({
       fileName,
       data,
-      status: isHighConfidence ? "processed" : "needs_review"
+      status: !isHighConfidence ? "needs_review" : (validationResult && !validationResult.valid) ? "validation_failed" : "processed"
     });
   } catch (err) {
-    console.error(`    ? ERROR: ${err.message}`);
+    console.error(`    ❌ ERROR: ${err.message}`);
     runResults.push({
       fileName,
       data: null,
@@ -128,6 +168,7 @@ function saveDailySummaryCSV(runResults) {
       vendor_confidence: r.data.vendor_confidence ?? "",
       purchaseOrderNumber: r.data.purchaseOrderNumber ?? "",
       trackingNumber: r.data.trackingNumber ?? "",
+      validationPassed: r.data.validationResult ? r.data.validationResult.valid : "n/a",
       status: r.status
     };
   });
@@ -142,10 +183,12 @@ function saveDailySummaryCSV(runResults) {
   ];
 
   fs.writeFileSync(csvPath, csvLines.join("\n") + "\n", "utf8");
-  console.log(`\n?? Daily summary saved: ${csvPath}`);
+  console.log(`\n📊 Daily summary saved: ${csvPath}`);
 }
 
 async function main() {
+  ensureDirectoriesExist();
+
   if (!process.env.GITHUB_TOKEN || process.env.GITHUB_TOKEN.startsWith("github_pat_...")) {
     console.error("ERROR: Set your GITHUB_TOKEN in .env file");
     process.exit(1);
@@ -158,7 +201,7 @@ async function main() {
     return;
   }
 
-  console.log(`\n?? Processing ${files.length} invoice(s)...\n`);
+  console.log(`\n📋 Processing ${files.length} invoice(s)...\n`);
   const runResults = [];
 
   for (const file of files) {
@@ -169,10 +212,11 @@ async function main() {
 
   const processed = runResults.filter(r => r.status === "processed").length;
   const needsReview = runResults.filter(r => r.status === "needs_review").length;
+  const validationFailed = runResults.filter(r => r.status === "validation_failed").length;
   const errors = runResults.filter(r => r.status === "error").length;
 
-  console.log(`\n? Done!`);
-  console.log(`   Processed: ${processed} | Needs Review: ${needsReview} | Errors: ${errors}`);
+  console.log(`\n✅ Done!`);
+  console.log(`   Processed: ${processed} | Needs Review: ${needsReview} | Validation Failed: ${validationFailed} | Errors: ${errors}`);
 }
 
 main();
