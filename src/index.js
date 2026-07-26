@@ -77,14 +77,16 @@ async function processInvoice(filePath, runResults) {
       fs.writeFileSync(reviewNotePath, createReviewNote(data), "utf8");
     }
 
+    // Delete from input folder after successful processing
+    fs.unlinkSync(filePath);
+    console.log(`    ? Moved to ${isHighConfidence ? "processed" : "needs_review"}/ (removed from input)`);
+
     // Track for CSV
     runResults.push({
       fileName,
       data,
       status: isHighConfidence ? "processed" : "needs_review"
     });
-
-    console.log(`    ? Saved to ${isHighConfidence ? "processed" : "needs_review"}/`);
   } catch (err) {
     console.error(`    ? ERROR: ${err.message}`);
     runResults.push({
