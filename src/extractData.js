@@ -1,4 +1,4 @@
-const OpenAI = require("openai").default;
+﻿const OpenAI = require("openai").default;
 
 let client;
 function getClient() {
@@ -15,10 +15,11 @@ const SYSTEM_PROMPT = `You are an invoice data extraction assistant.
 Extract structured data from the invoice text provided by the user.
 Return ONLY valid JSON matching this exact schema. Use null for missing fields.
 
-For every "_confidence" field, set it to:
-- "high"   : field was clearly found and unambiguous
-- "medium" : field was inferred or partially matched
-- "low"    : field was guessed, missing, or unclear
+CRITICAL RULES FOR CONFIDENCE SCORING:
+- If a field value is null or empty string, its _confidence MUST be "low" (not "high" or "medium")
+- "high"   : field was clearly found, not empty, and unambiguous
+- "medium" : field was inferred, partially matched, or field exists but unclear
+- "low"    : field is missing, null, empty, or could not be found
 
 Set "needsHumanReview" to true if ANY critical field (invoiceNumber, totalAmount, vendor, purchaseOrderNumber) has confidence "low" or "medium".
 Set "reviewReason" to a short explanation of what needs checking.
@@ -31,6 +32,7 @@ Set "reviewReason" to a short explanation of what needs checking.
   "dueDate": null,
   "dueDate_confidence": "high",
   "paymentTerms": null,
+  "paymentTerms_confidence": "high",
   "vendor": { "name": null, "address": null },
   "vendor_confidence": "high",
   "billTo": { "name": null, "address": null },
@@ -52,11 +54,15 @@ Set "reviewReason" to a short explanation of what needs checking.
   "subtotal": null,
   "subtotal_confidence": "high",
   "tax": null,
+  "tax_confidence": "high",
   "shippingCost": null,
+  "shippingCost_confidence": "high",
   "totalAmount": null,
   "totalAmount_confidence": "high",
   "trackingNumber": null,
+  "trackingNumber_confidence": "high",
   "carrier": null,
+  "carrier_confidence": "high",
   "needsHumanReview": false,
   "reviewReason": null
 }`;
