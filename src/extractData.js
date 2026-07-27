@@ -35,7 +35,7 @@ CRITICAL RULES FOR TWO-COLUMN PDF LAYOUTS:
 - Many PDFs have a two-column layout: left column has labels, right column has values
 - pdf-parse may extract ALL values first, then ALL labels — OR all labels first, then all values
 - Match labels to values by their relative position order regardless of which comes first
-- A value appearing near a group of labels maps to the label at the same relative position
+- A PO value like "253439-00" may appear far from its "Purchase Order:" label — search the whole document
 
 CRITICAL RULES FOR LINE ITEMS:
 - PDF tables are often extracted without column separators, so columns get merged
@@ -132,10 +132,10 @@ function postProcessChecks(data) {
   }
 }
 
-async function retryLowConfidenceFields(pdfText, data, lowFields) {
+async function retryLowConfidenceFields(pdfText, lowFields) {
   const fieldDescriptions = {
     invoiceNumber: "the seller invoice number (Invoice No:, Invoice #:)",
-    purchaseOrderNumber: "the buyer purchase order number (Purchase Order:, PO:, Customer Order Number:) — DIFFERENT from invoice number",
+    purchaseOrderNumber: "the buyer purchase order number (Purchase Order:, PO:, Customer Order Number:) — DIFFERENT from invoice number. In some PDFs this value appears far from its label (e.g. after line items). Search the ENTIRE text.",
     totalAmount: "the total invoice amount due (Total:, Invoice Amount:, Amount Due:)",
     vendor: "the vendor/seller name and address (the company issuing the invoice)",
     invoiceDate: "the date the invoice was ISSUED (Invoice Date:) — NOT the ship date or order date",
@@ -154,8 +154,9 @@ async function retryLowConfidenceFields(pdfText, data, lowFields) {
 ${fieldList}
 
 Look very carefully at the invoice text and try again for ONLY these fields.
-Apply these rules:
+Rules:
 - Two-column PDFs: labels and values may appear in either order — match them positionally
+- Values can appear ANYWHERE in the document, even far from their label
 - invoiceDate is when the invoice was ISSUED, NOT the ship date
 - invoiceNumber and purchaseOrderNumber are ALWAYS different numbers
 - If a field is genuinely missing, return null with confidence "low"
@@ -176,6 +177,7 @@ Return JSON with ONLY these fields and their _confidence values.`;
 }
 
 async function extractInvoiceData(pdfText, criticalFields = []) {
+  // First pass — full extraction
   const response = await getClient().chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
@@ -189,28 +191,32 @@ async function extractInvoiceData(pdfText, criticalFields = []) {
   const data = normalizeText(JSON.parse(response.choices[0].message.content));
   postProcessChecks(data);
 
-  if (criticalFields.length > 0) {
-    const lowFields = criticalFields.filter(f => data[`${f}_confidence`] !== "high");
+  // Build retry list: user's critical fields that are low + purchaseOrderNumber always included
+  const ALWAYS_RETRY = ["purchaseOrderNumber"];
+  const retrySet = new Set([
+    ...criticalFields.filter(f => data[`${f}_confidence`] !== "high"),
+    ...ALWAYS_RETRY.filter(f => data[`${f}_confidence`] !== "high")
+  ]);
 
-    if (lowFields.length > 0) {
-      console.log(`    ↻ Retrying low-confidence fields: ${lowFields.join(", ")}`);
-      try {
-        const retryResult = normalizeText(await retryLowConfidenceFields(pdfText, data, lowFields));
+  if (retrySet.size > 0) {
+    const lowFields = [...retrySet];
+    console.log(`    ↻ Retrying low-confidence fields: ${lowFields.join(", ")}`);
+    try {
+      const retryResult = normalizeText(await retryLowConfidenceFields(pdfText, lowFields));
 
-        for (const field of lowFields) {
-          const retryConfidence = retryResult[`${field}_confidence`];
-          const retryValue = retryResult[field];
+      for (const field of lowFields) {
+        const retryConfidence = retryResult[`${field}_confidence`];
+        const retryValue = retryResult[field];
 
-          if (retryConfidence === "high" && retryValue !== null && retryValue !== "") {
-            data[field] = retryValue;
-            data[`${field}_confidence`] = "high";
-          }
+        if (retryConfidence === "high" && retryValue !== null && retryValue !== "") {
+          data[field] = retryValue;
+          data[`${field}_confidence`] = "high";
         }
-
-        postProcessChecks(data);
-      } catch (err) {
-        console.warn(`    ⚠ Retry failed: ${err.message}`);
       }
+
+      postProcessChecks(data);
+    } catch (err) {
+      console.warn(`    ⚠ Retry failed: ${err.message}`);
     }
   }
 

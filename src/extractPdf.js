@@ -6,21 +6,26 @@ const HEAD_CHARS = 8000;
 const TAIL_CHARS = 4000;
 
 function preprocessText(text) {
+  // Normalize Unicode dashes first
+  text = text
+    .replace(/\u2212/g, "-")
+    .replace(/\u2013/g, "-")
+    .replace(/\u2014/g, "-");
+
   return text
     .split("\n")
-    // Remove barcode/garbage lines (e.g. "!#*US689178Y22*#!", long hex strings)
+    // Remove barcode/garbage lines (e.g. "!#*US689178Y22*#!")
     .filter(line => !line.match(/^[!#*@|]+[A-Z0-9]{6,}[!#*@|]+$/))
     // Remove lines that are only punctuation, dashes, or stars
     .filter(line => !line.match(/^[\s\-=*_.#|]{3,}$/))
-    // Remove lines that are entirely non-printable or very short symbol noise
+    // Remove lines with no alphanumeric characters (pure noise)
     .filter(line => {
       const stripped = line.trim();
-      if (stripped.length === 0) return true; // keep blank lines for spacing
-      // keep if it has at least one alphanumeric character
+      if (stripped.length === 0) return true;
       return /[a-zA-Z0-9]/.test(stripped);
     })
     .join("\n")
-    // Collapse 3+ consecutive blank lines into one blank line
+    // Collapse 3+ consecutive blank lines into one
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
