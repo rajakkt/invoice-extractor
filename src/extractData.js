@@ -15,6 +15,13 @@ const SYSTEM_PROMPT = `You are an invoice data extraction assistant.
 Extract structured data from the invoice text provided by the user.
 Return ONLY valid JSON matching this exact schema. Use null for missing fields.
 
+CRITICAL RULES FOR FIELD DISAMBIGUATION:
+- "invoiceNumber" is the SELLER's document ID (e.g., "Invoice No:", "Invoice #:", "Invoice Number:")
+- "purchaseOrderNumber" is the BUYER's PO number (e.g., "Purchase Order:", "PO:", "PO Number:", "Customer Order Number:")
+- These are DIFFERENT numbers. Never assign the invoice number to the purchaseOrderNumber field.
+- If "Purchase Order:" label exists but has no value after it, purchaseOrderNumber = null and confidence = "low"
+- PDF text extraction often merges a value and its label (e.g., "US689178Invoice No:" means invoiceNumber = "US689178")
+
 CRITICAL RULES FOR LINE ITEMS:
 - PDF tables are often extracted without column separators, so columns get merged
 - A line like "1193.99193.99" means: quantity=1, unitPrice=193.99, totalPrice=193.99
