@@ -21,12 +21,21 @@ CRITICAL RULES FOR FIELD DISAMBIGUATION:
 - These are DIFFERENT numbers. Never assign the invoice number to purchaseOrderNumber.
 - PDF text extraction often merges a value and its label (e.g., "US689178Invoice No:" means invoiceNumber = "US689178")
 
+CRITICAL RULES FOR DATE FIELDS:
+- "invoiceDate" is the date the invoice was ISSUED (label: "Invoice Date:", "Date:")
+- "dueDate" is the PAYMENT due date (label: "Due Date:", "Payment Due:", "Pay By:")
+- "shipDate" or shipping date is NOT the invoiceDate — do not confuse them
+- In two-column PDFs, date values may appear BEFORE their labels in the extracted text
+  Example: "09-Jun-25\n16-Jun-25\n...\nInvoice Date:\n...\nShip Date:" means
+  the first date (09-Jun-25) is the Ship Date and the second (16-Jun-25) is the Invoice Date
+  because they appear in the same order as the labels that follow
+- Always match dates to their labels by positional order, whether labels come before or after values
+
 CRITICAL RULES FOR TWO-COLUMN PDF LAYOUTS:
 - Many PDFs have a two-column layout: left column has labels, right column has values
-- pdf-parse extracts ALL left-column labels first, then ALL right-column values after
-- Example: you may see "Purchase Order:\nShipping Terms:\nCarrier:" (all labels) followed later by "253439-00\nFCA SHIPPING POINT\nFedEx" (all values in same order)
-- Match labels to values by their relative position order
-- A value like "253439-00" appearing after a group of labels is the PO number
+- pdf-parse may extract ALL values first, then ALL labels — OR all labels first, then all values
+- Match labels to values by their relative position order regardless of which comes first
+- A value appearing near a group of labels maps to the label at the same relative position
 
 CRITICAL RULES FOR LINE ITEMS:
 - PDF tables are often extracted without column separators, so columns get merged
@@ -94,7 +103,6 @@ Set "reviewReason" to a short explanation of what needs checking.
   "reviewReason": null
 }`;
 
-// Normalize special Unicode dash/minus chars that PDF extraction sometimes produces
 function normalizeText(obj) {
   if (typeof obj === "string") {
     return obj
@@ -110,9 +118,7 @@ function normalizeText(obj) {
   return obj;
 }
 
-// Post-process deterministic checks — things we can verify in code without AI
 function postProcessChecks(data) {
-  // If invoiceNumber === purchaseOrderNumber, the AI confused them
   if (
     data.invoiceNumber &&
     data.purchaseOrderNumber &&
@@ -126,15 +132,14 @@ function postProcessChecks(data) {
   }
 }
 
-// Retry extraction for specific fields that had low/medium confidence
 async function retryLowConfidenceFields(pdfText, data, lowFields) {
   const fieldDescriptions = {
     invoiceNumber: "the seller invoice number (Invoice No:, Invoice #:)",
-    purchaseOrderNumber: "the buyer purchase order number (Purchase Order:, PO:, Customer Order Number:) — this is DIFFERENT from the invoice number",
+    purchaseOrderNumber: "the buyer purchase order number (Purchase Order:, PO:, Customer Order Number:) — DIFFERENT from invoice number",
     totalAmount: "the total invoice amount due (Total:, Invoice Amount:, Amount Due:)",
     vendor: "the vendor/seller name and address (the company issuing the invoice)",
-    invoiceDate: "the invoice date",
-    dueDate: "the payment due date",
+    invoiceDate: "the date the invoice was ISSUED (Invoice Date:) — NOT the ship date or order date",
+    dueDate: "the payment due date (Due Date:, Pay By:)",
     paymentTerms: "the payment terms (e.g. Net 30)",
     subtotal: "the subtotal before tax and shipping",
     tax: "the tax amount",
@@ -150,15 +155,12 @@ ${fieldList}
 
 Look very carefully at the invoice text and try again for ONLY these fields.
 Apply these rules:
-- Two-column PDFs: labels appear first, then values appear later in the same order
+- Two-column PDFs: labels and values may appear in either order — match them positionally
+- invoiceDate is when the invoice was ISSUED, NOT the ship date
 - invoiceNumber and purchaseOrderNumber are ALWAYS different numbers
 - If a field is genuinely missing, return null with confidence "low"
 
-Return JSON with ONLY these fields and their _confidence values. Example format:
-{
-  "purchaseOrderNumber": "12345",
-  "purchaseOrderNumber_confidence": "high"
-}`;
+Return JSON with ONLY these fields and their _confidence values.`;
 
   const response = await getClient().chat.completions.create({
     model: "gpt-4o-mini",
@@ -174,7 +176,6 @@ Return JSON with ONLY these fields and their _confidence values. Example format:
 }
 
 async function extractInvoiceData(pdfText, criticalFields = []) {
-  // First pass — full extraction
   const response = await getClient().chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
@@ -186,11 +187,8 @@ async function extractInvoiceData(pdfText, criticalFields = []) {
   });
 
   const data = normalizeText(JSON.parse(response.choices[0].message.content));
-
-  // Deterministic post-processing
   postProcessChecks(data);
 
-  // Retry: find critical fields that did not come back with high confidence
   if (criticalFields.length > 0) {
     const lowFields = criticalFields.filter(f => data[`${f}_confidence`] !== "high");
 
@@ -203,14 +201,12 @@ async function extractInvoiceData(pdfText, criticalFields = []) {
           const retryConfidence = retryResult[`${field}_confidence`];
           const retryValue = retryResult[field];
 
-          // Only accept retry result if it improved confidence AND has a non-null value
           if (retryConfidence === "high" && retryValue !== null && retryValue !== "") {
             data[field] = retryValue;
             data[`${field}_confidence`] = "high";
           }
         }
 
-        // Re-run post-process checks after merge (retry might have set PO = invoice number again)
         postProcessChecks(data);
       } catch (err) {
         console.warn(`    ⚠ Retry failed: ${err.message}`);
