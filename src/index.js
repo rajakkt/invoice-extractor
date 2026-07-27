@@ -80,7 +80,7 @@ async function processInvoice(filePath, runResults) {
     const pdfText = await extractText(filePath);
     console.log(`    Extracted ${pdfText.length} chars`);
 
-    const data = await extractInvoiceData(pdfText);
+    const data = await extractInvoiceData(pdfText, CRITICAL_CONFIDENCE_FIELDS);
 
     const isHighConfidence = isCriticalFieldsHighConfidence(data);
 
@@ -231,3 +231,4 @@ async function main() {
 }
 
 main();
+

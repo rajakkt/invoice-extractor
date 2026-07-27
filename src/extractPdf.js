@@ -1,9 +1,29 @@
 ﻿const fs = require("fs");
 const pdfParse = require("pdf-parse");
 
-const MAX_CHARS = 12000; // ~3,000 tokens, safe for GitHub Models rate limits
+const MAX_CHARS = 12000;
 const HEAD_CHARS = 8000;
 const TAIL_CHARS = 4000;
+
+function preprocessText(text) {
+  return text
+    .split("\n")
+    // Remove barcode/garbage lines (e.g. "!#*US689178Y22*#!", long hex strings)
+    .filter(line => !line.match(/^[!#*@|]+[A-Z0-9]{6,}[!#*@|]+$/))
+    // Remove lines that are only punctuation, dashes, or stars
+    .filter(line => !line.match(/^[\s\-=*_.#|]{3,}$/))
+    // Remove lines that are entirely non-printable or very short symbol noise
+    .filter(line => {
+      const stripped = line.trim();
+      if (stripped.length === 0) return true; // keep blank lines for spacing
+      // keep if it has at least one alphanumeric character
+      return /[a-zA-Z0-9]/.test(stripped);
+    })
+    .join("\n")
+    // Collapse 3+ consecutive blank lines into one blank line
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 function smartTruncate(text) {
   if (text.length <= MAX_CHARS) return { text, truncated: false };
@@ -25,7 +45,9 @@ function smartTruncate(text) {
 async function extractText(filePath) {
   const buffer = fs.readFileSync(filePath);
   const data = await pdfParse(buffer);
-  const { text, truncated, originalLength } = smartTruncate(data.text);
+
+  const cleaned = preprocessText(data.text);
+  const { text, truncated, originalLength } = smartTruncate(cleaned);
 
   if (truncated) {
     console.log(`  ⚠ Long PDF (${originalLength} chars) → truncated to ~${MAX_CHARS} chars (head + tail)`);
