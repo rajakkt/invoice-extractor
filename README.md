@@ -5,12 +5,15 @@ AI-powered invoice PDF extractor using GitHub Models (gpt-4o-mini). Extracts str
 ## Features
 
 - **AI-Powered Extraction**: Uses GPT-4o-mini to intelligently extract invoice data from any PDF format
+- **PDF Pre-processing**: Strips barcode noise, garbage lines, and symbol clutter before AI processing
 - **Confidence Scoring**: Each extracted field gets a confidence rating (high/medium/low)
+- **Smart Retry**: Low-confidence critical fields are automatically re-queried with a focused prompt
+- **Deterministic Validation**: Post-process checks catch known AI errors (e.g. invoice number copied to PO field)
 - **Configurable Critical Fields**: Choose which fields must be "high" confidence to route to processed/
 - **Smart Routing**: Automatically sorts invoices based on critical field confidence
-- **Amount Validation**: Optional validation checks for invoice math, ranges, and consistency (--validate flag)
-- **Daily Summaries**: Generates timestamped CSV reports for each processing run
-- **No Database Required**: File-based workflow using folder structure for state management
+- **Amount Validation**: Optional math/range checks with `--validate` flag
+- **Daily Summaries**: Timestamped CSV reports, appends across multiple runs per day
+- **No Database Required**: File-based workflow — folder structure is the state machine
 - **Audit Trail**: PDF + JSON pairs saved together, REVIEW_NOTE.txt for flagged invoices
 - **Cost-Effective**: Uses GitHub Models free tier (~$0 cost for typical volumes)
 
@@ -72,6 +75,16 @@ CRITICAL_CONFIDENCE_FIELDS=
 
 **Default:** `invoiceNumber,totalAmount,vendor` (when not specified)
 
+### Validation Thresholds
+
+Used only when running `npm start --validate`:
+
+```env
+MIN_AMOUNT=0.01        # Minimum invoice amount (dollars)
+MAX_AMOUNT=10000000    # Maximum invoice amount (dollars)
+TOLERANCE=1.0          # Tolerance for math checks (dollars)
+```
+
 ## Usage
 
 ### Run Extraction
@@ -82,25 +95,33 @@ npm start
 
 **What happens:**
 1. Reads all PDFs from `input/` folder
-2. Extracts structured data using AI
-3. Checks critical fields against configured list
-4. Routes invoices based on confidence:
+2. Pre-processes extracted text (strips noise, barcodes, garbage lines)
+3. Extracts structured data using AI (gpt-4o-mini)
+4. Runs deterministic post-process checks (e.g. invoice number ≠ PO number)
+5. Retries any critical fields with low confidence using a focused second AI call
+6. Routes invoices based on confidence:
    - **All critical fields "high"** → `output/processed/`
    - **Any critical field not "high"** → `output/needs_review/`
-5. Generates daily CSV summary: `output/daily_summaries/invoices_YYYY-MM-DD.csv`
-6. Deletes processed PDFs from `input/`
+7. Generates daily CSV summary (appends if run multiple times per day)
+8. Deletes PDFs from `input/` after processing (errors go to `needs_review/`)
 
 ### Run with Validation
-
-To enable optional amount validation:
 
 ```bash
 npm start --validate
 ```
 
-This checks invoice math (subtotal + tax = total) and amounts for reasonableness.
+Adds amount math and range checks. Only runs for invoices that already passed confidence checks.
 
-### Folder Structure After Processing
+### Cleanup
+
+```bash
+npm run cleanup
+```
+
+Empties all output folders and `input/` for a fresh test run.
+
+## Folder Structure
 
 ```
 invoice-extractor/
@@ -111,23 +132,19 @@ invoice-extractor/
     +-- processed/                  → Ready for ERP
     │   +-- invoice1.pdf
     │   +-- invoice1.json
+    │
+    +-- needs_review/               ⚠ Manual review needed
     │   +-- invoice2.pdf
     │   +-- invoice2.json
+    │   +-- invoice2_REVIEW_NOTE.txt
     │
-    +-- needs_review/               ⚠ Manual review needed (critical field low confidence)
+    +-- validation_failed/          ❌ Amount validation failed
     │   +-- invoice3.pdf
     │   +-- invoice3.json
-    │   +-- invoice3_REVIEW_NOTE.txt (explains issues)
-    │
-    +-- validation_failed/          ❌ Validation failed (math/amount issues)
-    │   +-- invoice4.pdf
-    │   +-- invoice4.json
-    │   +-- invoice4_VALIDATION_NOTE.txt (explains issues)
+    │   +-- invoice3_REVIEW_NOTE.txt
     │
     +-- daily_summaries/
         +-- invoices_2026-07-26.csv
-        +-- invoices_2026-07-27.csv
-        +-- ...
 ```
 
 ## Extracted Fields
@@ -144,165 +161,110 @@ Each invoice JSON contains:
   "dueDate_confidence": "high",
   "paymentTerms": "Net 30",
   "paymentTerms_confidence": "high",
-  
-  "vendor": {
-    "name": "VENDOR NAME",
-    "address": "Full Address"
-  },
+  "vendor": { "name": "BRANSON ULTRASONICS CORP.", "address": "120 Park Ridge Road..." },
   "vendor_confidence": "high",
-  
-  "billTo": {
-    "name": "BILL TO NAME",
-    "address": "Address"
-  },
-  
-  "shipTo": {
-    "name": "SHIP TO NAME",
-    "address": "Address"
-  },
-  
-  "purchaseOrderNumber": "PO-123",
+  "billTo": { "name": "HISCO INC", "address": "..." },
+  "shipTo": { "name": "HISCO INC", "address": "..." },
+  "purchaseOrderNumber": "260425",
   "purchaseOrderNumber_confidence": "high",
-  
   "currency": "USD",
-  
   "lineItems": [
     {
       "lineNumber": "1",
-      "partNumber": "PART-001",
-      "description": "Product Description",
-      "quantity": 10,
-      "unitPrice": 100.00,
-      "totalPrice": 1000.00,
+      "partNumber": "1100-410-168",
+      "description": "A82-3 B8210 PERF TRAY",
+      "quantity": 1,
+      "unitPrice": 193.99,
+      "totalPrice": 193.99,
       "uom": "Each"
     }
   ],
-  
-  "subtotal": 1000.00,
+  "subtotal": 2101.22,
   "subtotal_confidence": "high",
-  "tax": 0.00,
-  "tax_confidence": "high",
-  "shippingCost": 0.00,
-  "shippingCost_confidence": "high",
-  "totalAmount": 1000.00,
+  "tax": null,
+  "tax_confidence": "low",
+  "shippingCost": null,
+  "shippingCost_confidence": "low",
+  "totalAmount": 2101.22,
   "totalAmount_confidence": "high",
-  
-  "trackingNumber": "123456789",
+  "trackingNumber": "610814762069",
   "trackingNumber_confidence": "high",
-  "carrier": "FedEx",
+  "carrier": "FEDEX-PARCEL-INTRA US - GROUND",
   "carrier_confidence": "high",
-  
   "needsHumanReview": false,
   "reviewReason": null
 }
 ```
 
-## Confidence Scoring
+## How Extraction Works
 
-The AI evaluates each field and assigns a confidence level:
+### Step 1 — PDF Text Extraction + Pre-processing
+
+`pdf-parse` extracts raw text from the PDF. Before sending to AI, the text is cleaned:
+- Barcode lines (e.g. `!#*US689178Y22*#!`) are removed
+- Lines containing only symbols, dashes, or stars are removed
+- Consecutive blank lines are collapsed
+- Long PDFs (>12,000 chars) are truncated: first 8,000 + last 4,000 chars, cut at newline boundaries
+
+### Step 2 — AI Extraction (gpt-4o-mini)
+
+The cleaned text is sent to the AI with a detailed system prompt covering:
+
+- **Field disambiguation**: `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO — always different
+- **Two-column layouts**: pdf-parse often extracts all labels first, then all values — the AI matches them by position
+- **Merged table columns**: `1193.99193.99` = qty:1, unitPrice:193.99, totalPrice:193.99 — verified by qty × price = total
+- **Confidence rules**: null/empty fields always get `low` confidence, not `high`
+
+### Step 3 — Deterministic Post-processing
+
+Code checks that don't need AI:
+- If `invoiceNumber === purchaseOrderNumber`, the PO is set to `null/low` (known AI misread pattern)
+
+### Step 4 — Retry Low-Confidence Fields
+
+If any critical field (from `CRITICAL_CONFIDENCE_FIELDS`) comes back with less than `high` confidence, a second focused AI call is made for only those fields. The retry prompt gives specific guidance about the field. If the retry returns `high` confidence, the result is merged in. If not, the invoice routes to `needs_review/` as normal.
+
+## Confidence Scoring
 
 | Level | Meaning |
 |---|---|
-| **high** | Field was clearly found, not empty, and unambiguous |
-| **medium** | Field was inferred or partially matched |
-| **low** | Field is missing, null, empty, or could not be found |
+| **high** | Field clearly found, not empty, unambiguous |
+| **medium** | Field inferred or partially matched |
+| **low** | Field missing, null, empty, or not found |
 
 ### Routing Rules
 
-Only **critical fields** (from `CRITICAL_CONFIDENCE_FIELDS`) affect routing:
-- **ALL critical fields = "high"** → `processed/` folder
-- **ANY critical field ≠ "high"** → `needs_review/` folder + REVIEW_NOTE.txt
-- **Non-critical fields** can have any confidence level without affecting routing
+Only **critical fields** affect routing:
+- **ALL critical fields = "high"** → `processed/`
+- **ANY critical field ≠ "high"** (after retry) → `needs_review/`
 
-**Example:**
-```env
-CRITICAL_CONFIDENCE_FIELDS=invoiceNumber,totalAmount,vendor
-```
+## Amount Validation (`--validate`)
 
-In this case:
-- ✅ Missing PO number? Still goes to `processed/` (not critical)
-- ✅ Empty tax field? Still goes to `processed/` (not critical)
-- ❌ Missing vendor? Goes to `needs_review/` (is critical)
-- ❌ Unclear total amount? Goes to `needs_review/` (is critical)
+When enabled, checks high-confidence invoices for:
 
-## Amount Validation (Optional)
+| Check | Rule |
+|---|---|
+| Range | $0.01 ≤ total ≤ $10,000,000 |
+| Math | subtotal + tax + shipping = total (within $1 tolerance) |
+| Line items | Sum of line item totals ≈ subtotal |
 
-When `npm start --validate` is used, additional checks run **only for high-confidence invoices**:
-
-### Validation Checks
-
-- **Range**: Amount is between $0.01 and $10,000,000
-- **Math**: subtotal + tax + shipping = total (within $1 tolerance)
-- **Line Items**: Sum of line items matches subtotal
-- **No Negatives**: All amounts are positive or zero
-
-### Validation Routing
-
-- **High confidence + Valid amounts** → `processed/`
-- **High confidence + Invalid amounts** → `validation_failed/` + VALIDATION_NOTE.txt
-- **Low confidence** → `needs_review/` (validation skipped)
-
-### Configuration
-
-Edit `.env` to customize validation thresholds:
-
-```env
-GITHUB_TOKEN=github_pat_...
-MIN_AMOUNT=0.01              # Minimum invoice amount (dollars)
-MAX_AMOUNT=10000000          # Maximum invoice amount (dollars)
-TOLERANCE=1.0                # Tolerance for math checks (dollars)
-```
-
-### Example Validation Output
-
-When validation fails, invoices go to `validation_failed/` with a VALIDATION_NOTE.txt:
-
-```
-INVOICE FLAGGED FOR REVIEW
-=====================================
-Invoice #: INV-2025-0001
-Date: 2026-07-26T16:00:00Z
-Reason: Validation Failed
-
-Issues Found:
-  ⚠ Math mismatch: subtotal ($1000) + tax ($100) + shipping ($0) = $1100, but total is $1099.99 (diff: $0.01)
-  ⚠ Line items sum ($950) does not match subtotal ($1000)
-
-Next Steps:
-1. Review the JSON file for accuracy
-2. Verify amounts in the PDF
-3. Fix line item totals if needed
-4. Move to ../processed/ once corrected
-```
+Failed invoices go to `validation_failed/` with a REVIEW_NOTE.txt explaining the issues.
 
 ## Daily Summary CSV
 
-The CSV includes all invoices processed that day:
+Appends a row per invoice to `output/daily_summaries/invoices_YYYY-MM-DD.csv`. Running multiple times per day accumulates all results in one file.
 
-```csv
-fileName,invoiceNumber,invoiceDate,dueDate,paymentTerms,vendorName,...,invoiceNumber_confidence,totalAmount_confidence,vendor_confidence,...,validationPassed,status
-invoice1.pdf,20031881,17-APR-2025,17-MAY-2025,Net 30,BRANSON CORP,...,high,high,high,...,n/a,processed
-invoice2.pdf,US689178,09-Jun-2025,16-Jul-2025,Net 30,Tektronix Inc,...,high,high,high,...,n/a,processed
-```
-
-Columns include:
-- `validationPassed`: "true", "false", or "n/a" (if validation not run)
-- `status`: "processed", "needs_review", "validation_failed", or "error"
-
-Useful for:
-- Daily audit trails
-- Tracking extraction success rates
-- Reconciliation with ERP uploads
+Columns: `fileName`, `invoiceNumber`, `invoiceDate`, `dueDate`, `paymentTerms`, `vendorName`, `currency`, `subtotal`, `tax`, `totalAmount`, `purchaseOrderNumber`, `invoiceNumber_confidence`, `totalAmount_confidence`, `vendor_confidence`, `purchaseOrderNumber_confidence`, `trackingNumber`, `validationPassed`, `status`, `error`
 
 ## Handling Needs Review
 
-Invoices in `needs_review/` contain a `REVIEW_NOTE.txt` file explaining which critical fields failed:
+When an invoice goes to `needs_review/`, a `REVIEW_NOTE.txt` is created:
 
 ```
 INVOICE FLAGGED FOR REVIEW
 =====================================
 Invoice #: US689178
-Date: 2026-07-26T16:00:00Z
+Date: 2026-07-26T22:00:00Z
 Reason: Low Confidence on Critical Fields
 
 Issues Found:
@@ -315,75 +277,38 @@ Next Steps:
 3. Once verified, move this folder to ../processed/
 ```
 
-**To approve and move to processed:**
-1. Review the invoice and JSON
-2. Manually fix any errors in the JSON if needed
-3. Move the folder from `needs_review/` to `processed/`
-
-## Cleanup Script
-
-To reset everything and test from scratch:
-
-```bash
-npm run cleanup
-```
-
-This removes all:
-- PDFs in `input/`
-- Files in `output/processed/`
-- Files in `output/needs_review/`
-- Files in `output/validation_failed/`
-- Files in `output/daily_summaries/`
-
-Ready for a fresh test run!
+To approve: fix the JSON if needed, then move the folder to `processed/`.
 
 ## Cost
 
-**GitHub Models Free Tier:**
-- ~150 requests/day
-- ~250,000 tokens/day
-- Cost: $0
+**GitHub Models Free Tier:** ~150 requests/day, ~250,000 tokens/day, $0 cost
 
-**Typical usage:**
-- 3 invoices ≈ 11,000 tokens
-- 1 large invoice (25k chars) ≈ 3,000 tokens (truncated)
+**Typical usage per invoice:**
+- Normal invoice: 1 API call (~3,000–4,000 tokens)
+- Invoice with low-confidence retry: 2 API calls (~6,000–8,000 tokens)
 
 ## Limitations
 
-- Large invoices (>12k chars) are truncated to prevent token limits
-- AI extraction quality depends on PDF legibility and format consistency
-- Confidence scoring is AI-based, not a formal algorithm
-- Validation checks are based on heuristics and may have tolerance issues
+- Large PDFs (>12,000 chars after cleaning) are truncated — very long invoices may lose mid-section line items
+- AI confidence scoring is AI-based judgment, not a formal algorithm
+- `pdf-parse` cannot handle scanned/image-based PDFs (returns empty text)
 
 ## Next Steps
 
-This tool is Phase 1 (extraction). Planned:
 - **ERP Integration**: Send `processed/` invoices to Infor Vendor Invoice Center
-- **Email Automation**: Auto-download from Outlook instead of manual folder
-- **PO Validation**: 2-way/3-way matching against Purchase Orders
-- **Approval Workflow**: Web dashboard for `needs_review/` approvals
+- **Email Automation**: Auto-download invoices from Outlook
+- **PO Matching**: 2-way/3-way matching against Purchase Orders in ERP
 
 ## Troubleshooting
 
-**"ERROR: Set your GITHUB_TOKEN in .env file"**
-- Make sure `.env` file exists and has valid token
-- Token must have `models` scope enabled
-
-**"No PDF files in input/ folder"**
-- Drop your PDFs into the `input/` folder first
-
-**"Long PDF truncated"**
-- PDFs >12,000 chars are automatically truncated (keeps start + end)
-- This is normal and preserves the most important data
-
-**"Invoices going to needs_review when I don't expect it"**
-- Check your `CRITICAL_CONFIDENCE_FIELDS` setting in `.env`
-- The invoice has low confidence on one of those critical fields
-- Review the REVIEW_NOTE.txt to see which fields failed
-
-**"How do I make validation stricter/looser"**
-- Edit `.env` and adjust `MIN_AMOUNT`, `MAX_AMOUNT`, and `TOLERANCE`
-- Or change which fields are critical in `CRITICAL_CONFIDENCE_FIELDS`
+| Problem | Solution |
+|---|---|
+| `ERROR: Set your GITHUB_TOKEN` | Check `.env` exists and token has `models` scope |
+| `No PDF files in input/` | Drop PDFs into `input/` folder first |
+| `Long PDF truncated` | Normal — first 8k + last 4k chars kept |
+| Invoice goes to `needs_review` unexpectedly | Check REVIEW_NOTE.txt to see which critical field failed |
+| Validation fails on valid invoice | Check REVIEW_NOTE.txt for math details; adjust `TOLERANCE` in `.env` |
+| Extraction returns empty text | PDF may be scanned/image-based — not supported by pdf-parse |
 
 ## License
 
