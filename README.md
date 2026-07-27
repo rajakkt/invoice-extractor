@@ -1,11 +1,14 @@
 ﻿# Invoice Extractor
 
-AI-powered invoice PDF extractor using GitHub Models (gpt-4o-mini). Extracts structured invoice data with confidence scoring and automatic categorization for processing or manual review.
+AI-powered invoice PDF extractor using GitHub Models (gpt-4o-mini) with **positional PDF extraction** (pdfjs-dist). Extracts structured invoice data with confidence scoring and automatic categorization for processing or manual review.
+
+> **Branch:** `v2-positional` — uses coordinate-aware PDF extraction for higher accuracy.
+> See `main` branch for the original version.
 
 ## Features
 
 - **AI-Powered Extraction**: Uses GPT-4o-mini to intelligently extract invoice data from any PDF format
-- **PDF Pre-processing**: Strips barcode noise, garbage lines, and symbol clutter before AI processing
+- **Positional PDF Extraction**: Uses pdfjs-dist to extract text with (x,y) coordinates — reconstructs label-value pairs on the same row as `Label:\tValue`
 - **Confidence Scoring**: Each extracted field gets a confidence rating (high/medium/low)
 - **Smart Retry**: Low-confidence critical fields are automatically re-queried with a focused prompt
 - **Deterministic Validation**: Post-process checks catch known AI errors (e.g. invoice number copied to PO field)
@@ -198,21 +201,23 @@ Each invoice JSON contains:
 
 ## How Extraction Works
 
-### Step 1 — PDF Text Extraction + Pre-processing
+### Step 1 — Positional PDF Extraction
 
-`pdf-parse` extracts raw text from the PDF. Before sending to AI, the text is cleaned:
-- Barcode lines (e.g. `!#*US689178Y22*#!`) are removed
-- Lines containing only symbols, dashes, or stars are removed
-- Consecutive blank lines are collapsed
-- Long PDFs (>12,000 chars) are truncated: first 8,000 + last 4,000 chars, cut at newline boundaries
+`pdfjs-dist` extracts each text element with its (x, y) coordinates on the page. The extractor:
+- Groups text items that share the same Y position (within a 3-unit tolerance) into a single row
+- Sorts each row left-to-right by X coordinate
+- Reconstructs rows: items separated by a large gap get a tab separator → `Invoice Date:\t16-Jun-25`
+- Produces clean, structured text where labels and values always appear on the same line
+- Long PDFs (>12,000 chars) are truncated: first 8,000 + last 4,000 chars
+
+**Why this matters:** The old approach (pdf-parse) extracted raw text in PDF stream order — two-column layouts would often dump all labels first, then all values, or vice versa, forcing the AI to match them by positional ordering. With coordinate-aware extraction, the AI sees `Purchase Order:\t253439-00` on a single line and simply reads the value.
 
 ### Step 2 — AI Extraction (gpt-4o-mini)
 
 The cleaned text is sent to the AI with a detailed system prompt covering:
 
 - **Field disambiguation**: `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO — always different
-- **Two-column layouts**: pdf-parse often extracts all labels first, then all values — the AI matches them by position
-- **Merged table columns**: `1193.99193.99` = qty:1, unitPrice:193.99, totalPrice:193.99 — verified by qty × price = total
+- **Field disambiguation**: `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO — always different
 - **Confidence rules**: null/empty fields always get `low` confidence, not `high`
 
 ### Step 3 — Deterministic Post-processing
@@ -291,7 +296,7 @@ To approve: fix the JSON if needed, then move the folder to `processed/`.
 
 - Large PDFs (>12,000 chars after cleaning) are truncated — very long invoices may lose mid-section line items
 - AI confidence scoring is AI-based judgment, not a formal algorithm
-- `pdf-parse` cannot handle scanned/image-based PDFs (returns empty text)
+- `pdfjs-dist` cannot handle scanned/image-based PDFs (image PDFs return empty text — a vision API fallback would be needed)
 
 ## Next Steps
 

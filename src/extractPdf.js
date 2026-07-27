@@ -1,39 +1,66 @@
 ﻿const fs = require("fs");
-const pdfParse = require("pdf-parse");
+const path = require("path");
 
 const MAX_CHARS = 12000;
 const HEAD_CHARS = 8000;
 const TAIL_CHARS = 4000;
 
-function preprocessText(text) {
-  // Normalize Unicode dashes first
-  text = text
-    .replace(/\u2212/g, "-")
-    .replace(/\u2013/g, "-")
-    .replace(/\u2014/g, "-");
+// Items within Y_TOLERANCE units are considered the same row
+const Y_TOLERANCE = 3;
 
-  return text
-    .split("\n")
-    // Remove barcode/garbage lines (e.g. "!#*US689178Y22*#!")
-    .filter(line => !line.match(/^[!#*@|]+[A-Z0-9]{6,}[!#*@|]+$/))
-    // Remove lines that are only punctuation, dashes, or stars
-    .filter(line => !line.match(/^[\s\-=*_.#|]{3,}$/))
-    // Remove lines with no alphanumeric characters (pure noise)
-    .filter(line => {
-      const stripped = line.trim();
-      if (stripped.length === 0) return true;
-      return /[a-zA-Z0-9]/.test(stripped);
-    })
-    .join("\n")
-    // Collapse 3+ consecutive blank lines into one
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+function groupItemsByRow(items) {
+  const rows = [];
+
+  for (const item of items) {
+    const [, , , , x, y] = item.transform;
+    const text = item.str;
+    if (!text.trim()) continue;
+
+    const existingRow = rows.find(r => Math.abs(r.y - y) <= Y_TOLERANCE);
+    if (existingRow) {
+      existingRow.items.push({ x, text });
+    } else {
+      rows.push({ y, items: [{ x, text }] });
+    }
+  }
+
+  // Top-to-bottom (descending Y in PDF coords), left-to-right within each row
+  rows.sort((a, b) => b.y - a.y);
+  for (const row of rows) {
+    row.items.sort((a, b) => a.x - b.x);
+  }
+
+  return rows;
+}
+
+// Convert rows to text. Items separated by a large X gap get a tab separator,
+// making same-row label-value pairs readable as "Label:\tValue"
+function rowsToText(rows) {
+  const lines = [];
+
+  for (const row of rows) {
+    if (row.items.length === 0) continue;
+
+    let line = row.items[0].text;
+    for (let i = 1; i < row.items.length; i++) {
+      const prevItem = row.items[i - 1];
+      // Approximate char width as 4 units per character
+      const gap = row.items[i].x - (prevItem.x + prevItem.text.length * 4);
+      if (gap > 20) {
+        line += "\t" + row.items[i].text;
+      } else {
+        line += row.items[i].text;
+      }
+    }
+    lines.push(line);
+  }
+
+  return lines.join("\n");
 }
 
 function smartTruncate(text) {
   if (text.length <= MAX_CHARS) return { text, truncated: false };
 
-  // Cut at nearest newline to avoid splitting a line item row mid-value
   const headEnd = text.lastIndexOf("\n", HEAD_CHARS);
   const tailStart = text.indexOf("\n", text.length - TAIL_CHARS);
 
@@ -41,24 +68,51 @@ function smartTruncate(text) {
   const tail = text.slice(tailStart > 0 ? tailStart : text.length - TAIL_CHARS);
 
   return {
-    text: head + "\n\n[...middle section truncated for length...]\n\n" + tail,
+    text: head + "\n\n[...middle section truncated...]\n\n" + tail,
     truncated: true,
     originalLength: text.length
   };
 }
 
 async function extractText(filePath) {
-  const buffer = fs.readFileSync(filePath);
-  const data = await pdfParse(buffer);
+  // Dynamic import required since pdfjs-dist is ESM-only
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
-  const cleaned = preprocessText(data.text);
-  const { text, truncated, originalLength } = smartTruncate(cleaned);
+  const data = new Uint8Array(fs.readFileSync(filePath));
+  const loadingTask = pdfjsLib.getDocument({ data });
+  const pdf = await loadingTask.promise;
 
-  if (truncated) {
-    console.log(`  ⚠ Long PDF (${originalLength} chars) → truncated to ~${MAX_CHARS} chars (head + tail)`);
+  const allItems = [];
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+
+    // Offset Y per page so rows from different pages do not merge
+    const pageOffset = (pageNum - 1) * 10000;
+    for (const item of content.items) {
+      allItems.push({
+        ...item,
+        transform: [
+          item.transform[0], item.transform[1],
+          item.transform[2], item.transform[3],
+          item.transform[4],
+          item.transform[5] + pageOffset
+        ]
+      });
+    }
   }
 
-  return text;
+  const rows = groupItemsByRow(allItems);
+  const text = rowsToText(rows);
+
+  const { text: finalText, truncated, originalLength } = smartTruncate(text);
+
+  if (truncated) {
+    console.log(`  Long PDF (${originalLength} chars) truncated to ~${MAX_CHARS} chars`);
+  }
+
+  return finalText;
 }
 
 module.exports = { extractText };

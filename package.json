@@ -7,12 +7,18 @@
     "start": "node src/index.js",
     "cleanup": "node src/cleanup.js"
   },
-  "keywords": ["invoice", "pdf", "extraction", "gpt-4o-mini"],
+  "keywords": [
+    "invoice",
+    "pdf",
+    "extraction",
+    "gpt-4o-mini"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^17.4.2",
     "openai": "^6.49.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^6.1.200"
   }
 }
