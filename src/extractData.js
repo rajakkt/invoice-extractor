@@ -12,12 +12,8 @@ function getClient() {
 }
 
 const SYSTEM_PROMPT = `You are an invoice data extraction assistant.
-Extract structured data from the invoice text provided by the user.
-Return ONLY valid JSON matching this exact schema. Use null for missing fields.
-
-The invoice text preserves the original row layout of the PDF.
-Each line is one row. Tab characters (\t) separate columns within a row,
-so a label and its value on the same row appear as "Label:\tValue".
+You will be shown one or more images of an invoice PDF.
+Extract structured data and return ONLY valid JSON matching this exact schema. Use null for missing fields.
 
 RULES FOR FIELD DISAMBIGUATION:
 - "invoiceNumber" is the SELLER document ID (label: "Invoice No:", "Invoice #:", "Invoice Number:")
@@ -35,9 +31,9 @@ RULES FOR AMOUNTS:
 - Extract numeric values only, no currency symbols or commas (e.g., 2101.22 not $2,101.22)
 
 RULES FOR CONFIDENCE SCORING:
-- "high"   : field was clearly found, not empty, and unambiguous
-- "medium" : field was inferred, partially matched, or ambiguous
-- "low"    : field is missing, null, or empty - MUST use "low" when value is null or empty string
+- "high"   : field was clearly visible and unambiguous
+- "medium" : field was partially visible, inferred, or ambiguous
+- "low"    : field is missing or could not be found - MUST use "low" when value is null or empty string
 
 Set "needsHumanReview" to true if ANY critical field (invoiceNumber, totalAmount, vendor, purchaseOrderNumber) has confidence "low" or "medium".
 Set "reviewReason" to a short explanation of what needs checking.
@@ -114,7 +110,34 @@ function postProcessChecks(data) {
   }
 }
 
-async function retryLowConfidenceFields(pdfText, lowFields) {
+// Build the messages array with one image per page
+function buildVisionMessages(pages) {
+  const content = [
+    {
+      type: "text",
+      text: pages.length > 1
+        ? `This invoice has ${pages.length} pages. All pages are shown below. Extract data across all pages.`
+        : "Extract data from this invoice image."
+    }
+  ];
+
+  for (const { base64, pageNum, totalPages } of pages) {
+    if (totalPages > 1) {
+      content.push({ type: "text", text: `Page ${pageNum} of ${totalPages}:` });
+    }
+    content.push({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${base64}`, detail: "high" }
+    });
+  }
+
+  return [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content }
+  ];
+}
+
+async function retryLowConfidenceFields(pages, lowFields) {
   const fieldDescriptions = {
     invoiceNumber: "the seller invoice number (Invoice No:, Invoice #:)",
     purchaseOrderNumber: "the buyer purchase order number (Purchase Order:, PO:, Customer Order Number:) - DIFFERENT from invoice number",
@@ -132,21 +155,25 @@ async function retryLowConfidenceFields(pdfText, lowFields) {
     .map(f => `- ${f}: ${fieldDescriptions[f] || f}`)
     .join("\n");
 
-  const retryPrompt = `A previous extraction of this invoice had low confidence on these fields:
+  const retryPrompt = `A previous extraction had low confidence on these fields:
 ${fieldList}
 
-Look very carefully at the invoice text and try again for ONLY these fields.
-The text uses tabs to separate labels from values on the same row.
+Look very carefully at the invoice image(s) and try again for ONLY these fields.
 If a field is genuinely missing, return null with confidence "low".
-
 Return JSON with ONLY these fields and their _confidence values.`;
 
+  const content = [{ type: "text", text: retryPrompt }];
+  for (const { base64, pageNum, totalPages } of pages) {
+    if (totalPages > 1) content.push({ type: "text", text: `Page ${pageNum}:` });
+    content.push({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${base64}`, detail: "high" }
+    });
+  }
+
   const response = await getClient().chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: retryPrompt },
-      { role: "user", content: pdfText }
-    ],
+    model: "gpt-4o",
+    messages: [{ role: "user", content }],
     response_format: { type: "json_object" },
     temperature: 0
   });
@@ -154,14 +181,11 @@ Return JSON with ONLY these fields and their _confidence values.`;
   return JSON.parse(response.choices[0].message.content);
 }
 
-async function extractInvoiceData(pdfText, criticalFields = []) {
-  // First pass - full extraction
+async function extractInvoiceData(pages, criticalFields = []) {
+  // First pass - full extraction from images
   const response = await getClient().chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: pdfText }
-    ],
+    model: "gpt-4o",
+    messages: buildVisionMessages(pages),
     response_format: { type: "json_object" },
     temperature: 0
   });
@@ -169,7 +193,7 @@ async function extractInvoiceData(pdfText, criticalFields = []) {
   const data = normalizeText(JSON.parse(response.choices[0].message.content));
   postProcessChecks(data);
 
-  // Build retry list: user's critical fields that are low + purchaseOrderNumber always included
+  // Retry critical fields + purchaseOrderNumber if low confidence
   const ALWAYS_RETRY = ["purchaseOrderNumber"];
   const retrySet = new Set([
     ...criticalFields.filter(f => data[`${f}_confidence`] !== "high"),
@@ -180,12 +204,11 @@ async function extractInvoiceData(pdfText, criticalFields = []) {
     const lowFields = [...retrySet];
     console.log(`    Retrying low-confidence fields: ${lowFields.join(", ")}`);
     try {
-      const retryResult = normalizeText(await retryLowConfidenceFields(pdfText, lowFields));
+      const retryResult = normalizeText(await retryLowConfidenceFields(pages, lowFields));
 
       for (const field of lowFields) {
         const retryConfidence = retryResult[`${field}_confidence`];
         const retryValue = retryResult[field];
-
         if (retryConfidence === "high" && retryValue !== null && retryValue !== "") {
           data[field] = retryValue;
           data[`${field}_confidence`] = "high";

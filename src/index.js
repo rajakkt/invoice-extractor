@@ -1,7 +1,23 @@
-﻿require("dotenv").config();
+﻿// Suppress pdfjs-dist font-not-found warnings — irrelevant for image-based extraction
+// Patch both console.warn and stderr since pdfjs-dist uses different paths in different versions
+const FONT_WARN_PATTERNS = ["fetchStandardFontData", "standardFontDataUrl", "Unable to load font"];
+const _origWarn = console.warn.bind(console);
+console.warn = function (...args) {
+  const msg = args[0] ? String(args[0]) : "";
+  if (FONT_WARN_PATTERNS.some(p => msg.includes(p))) return;
+  _origWarn(...args);
+};
+const _stderrWrite = process.stderr.write.bind(process.stderr);
+process.stderr.write = function (chunk, ...args) {
+  const s = typeof chunk === "string" ? chunk : chunk.toString();
+  if (FONT_WARN_PATTERNS.some(p => s.includes(p))) return true;
+  return _stderrWrite(chunk, ...args);
+};
+
+require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const { extractText } = require("./extractPdf");
+const { extractPages } = require("./extractPdf");
 const { extractInvoiceData } = require("./extractData");
 const { validateAmounts } = require("./validate");
 
@@ -77,10 +93,10 @@ async function processInvoice(filePath, runResults) {
   console.log(`\n  Processing: ${fileName}`);
 
   try {
-    const pdfText = await extractText(filePath);
-    console.log(`    Extracted ${pdfText.length} chars`);
+    const pages = await extractPages(filePath);
+    console.log(`    Rendered ${pages.length} page(s) for vision extraction`);
 
-    const data = await extractInvoiceData(pdfText, CRITICAL_CONFIDENCE_FIELDS);
+    const data = await extractInvoiceData(pages, CRITICAL_CONFIDENCE_FIELDS);
 
     const isHighConfidence = isCriticalFieldsHighConfidence(data);
 

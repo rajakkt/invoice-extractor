@@ -1,127 +1,64 @@
 ﻿const fs = require("fs");
-const path = require("path");
+const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+const { createCanvas } = require("canvas");
 
-// pdfjs-dist emits font-related warnings to stderr that are irrelevant for text extraction.
-// Filter them out so the CLI output stays clean.
-const _stderrWrite = process.stderr.write.bind(process.stderr);
-process.stderr.write = function (chunk, ...args) {
-  const s = typeof chunk === "string" ? chunk : chunk.toString();
-  if (s.includes("standardFontDataUrl") || s.includes("Unable to load font data")) return true;
-  return _stderrWrite(chunk, ...args);
+
+// Render at 2x scale (~150 DPI) for sharp text without oversized images
+const SCALE = 2;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB per page
+
+// pdfjs-dist v3 NodeCanvasFactory — required for rendering in Node.js
+const NodeCanvasFactory = {
+  create(width, height) {
+    const canvas = createCanvas(width, height);
+    return { canvas, context: canvas.getContext("2d") };
+  },
+  reset(canvasAndContext, width, height) {
+    canvasAndContext.canvas.width = width;
+    canvasAndContext.canvas.height = height;
+  },
+  destroy(canvasAndContext) {
+    canvasAndContext.canvas.width = 0;
+    canvasAndContext.canvas.height = 0;
+  }
 };
 
-const MAX_CHARS = 12000;
-const HEAD_CHARS = 8000;
-const TAIL_CHARS = 4000;
+async function renderPage(page, scale) {
+  const viewport = page.getViewport({ scale });
+  const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+  const ctx = canvas.getContext("2d");
 
-// Items within Y_TOLERANCE units are considered the same row
-const Y_TOLERANCE = 3;
+  await page.render({
+    canvasContext: ctx,
+    viewport,
+    canvasFactory: NodeCanvasFactory
+  }).promise;
 
-function groupItemsByRow(items) {
-  const rows = [];
+  let buffer = canvas.toBuffer("image/png");
 
-  for (const item of items) {
-    const [, , , , x, y] = item.transform;
-    const text = item.str;
-    if (!text.trim()) continue;
-
-    const existingRow = rows.find(r => Math.abs(r.y - y) <= Y_TOLERANCE);
-    if (existingRow) {
-      existingRow.items.push({ x, text });
-    } else {
-      rows.push({ y, items: [{ x, text }] });
-    }
+  // If image is too large, re-render at reduced scale
+  if (buffer.length > MAX_IMAGE_BYTES) {
+    const reducedScale = scale * Math.sqrt(MAX_IMAGE_BYTES / buffer.length);
+    return renderPage(page, reducedScale);
   }
 
-  // Top-to-bottom (descending Y in PDF coords), left-to-right within each row
-  rows.sort((a, b) => b.y - a.y);
-  for (const row of rows) {
-    row.items.sort((a, b) => a.x - b.x);
-  }
-
-  return rows;
+  return buffer.toString("base64");
 }
 
-// Convert rows to text. Items separated by a large X gap get a tab separator,
-// making same-row label-value pairs readable as "Label:\tValue"
-function rowsToText(rows) {
-  const lines = [];
-
-  for (const row of rows) {
-    if (row.items.length === 0) continue;
-
-    let line = row.items[0].text;
-    for (let i = 1; i < row.items.length; i++) {
-      const prevItem = row.items[i - 1];
-      // Approximate char width as 4 units per character
-      const gap = row.items[i].x - (prevItem.x + prevItem.text.length * 4);
-      if (gap > 20) {
-        line += "\t" + row.items[i].text;
-      } else {
-        line += row.items[i].text;
-      }
-    }
-    lines.push(line);
-  }
-
-  return lines.join("\n");
-}
-
-function smartTruncate(text) {
-  if (text.length <= MAX_CHARS) return { text, truncated: false };
-
-  const headEnd = text.lastIndexOf("\n", HEAD_CHARS);
-  const tailStart = text.indexOf("\n", text.length - TAIL_CHARS);
-
-  const head = text.slice(0, headEnd > 0 ? headEnd : HEAD_CHARS);
-  const tail = text.slice(tailStart > 0 ? tailStart : text.length - TAIL_CHARS);
-
-  return {
-    text: head + "\n\n[...middle section truncated...]\n\n" + tail,
-    truncated: true,
-    originalLength: text.length
-  };
-}
-
-async function extractText(filePath) {
-  // Dynamic import required since pdfjs-dist is ESM-only
-  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-
+async function extractPages(filePath) {
   const data = new Uint8Array(fs.readFileSync(filePath));
-  const loadingTask = pdfjsLib.getDocument({ data });
-  const pdf = await loadingTask.promise;
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
 
-  const allItems = [];
-
+  const pages = [];
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
-
-    // Offset Y per page so rows from different pages do not merge
-    const pageOffset = (pageNum - 1) * 10000;
-    for (const item of content.items) {
-      allItems.push({
-        ...item,
-        transform: [
-          item.transform[0], item.transform[1],
-          item.transform[2], item.transform[3],
-          item.transform[4],
-          item.transform[5] + pageOffset
-        ]
-      });
-    }
+    const base64 = await renderPage(page, SCALE);
+    const sizeKB = Math.round(base64.length * 0.75 / 1024);
+    console.log(`    Rendered page ${pageNum}/${pdf.numPages} (${sizeKB} KB)`);
+    pages.push({ pageNum, base64, totalPages: pdf.numPages });
   }
 
-  const rows = groupItemsByRow(allItems);
-  const text = rowsToText(rows);
-
-  const { text: finalText, truncated, originalLength } = smartTruncate(text);
-
-  if (truncated) {
-    console.log(`  Long PDF (${originalLength} chars) truncated to ~${MAX_CHARS} chars`);
-  }
-
-  return finalText;
+  return pages;
 }
 
-module.exports = { extractText };
+module.exports = { extractPages };

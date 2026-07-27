@@ -16,9 +16,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "canvas": "^3.2.3",
     "dotenv": "^17.4.2",
     "openai": "^6.49.0",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^6.1.200"
+    "pdfjs-dist": "^3.11.174"
   }
 }
