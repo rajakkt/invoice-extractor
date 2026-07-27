@@ -19,8 +19,15 @@ CRITICAL RULES FOR FIELD DISAMBIGUATION:
 - "invoiceNumber" is the SELLER's document ID (e.g., "Invoice No:", "Invoice #:", "Invoice Number:")
 - "purchaseOrderNumber" is the BUYER's PO number (e.g., "Purchase Order:", "PO:", "PO Number:", "Customer Order Number:")
 - These are DIFFERENT numbers. Never assign the invoice number to the purchaseOrderNumber field.
-- If "Purchase Order:" label exists but has no value after it, purchaseOrderNumber = null and confidence = "low"
 - PDF text extraction often merges a value and its label (e.g., "US689178Invoice No:" means invoiceNumber = "US689178")
+
+CRITICAL RULES FOR TWO-COLUMN PDF LAYOUTS:
+- Many PDFs have a two-column layout: left column has labels, right column has values
+- pdf-parse extracts ALL left-column labels first, then ALL right-column values after
+- Example: you may see "Purchase Order:\nShipping Terms:\nCarrier:" (all labels) followed later by "253439-00\nFCA SHIPPING POINT\nFedEx" (all values in same order)
+- Match labels to values by their relative order — first label matches first value, etc.
+- A value like "253439-00" after a group of labels is the PO number, not a random number
+- Look for values that appear AFTER all labels are listed, and map them positionally
 
 CRITICAL RULES FOR LINE ITEMS:
 - PDF tables are often extracted without column separators, so columns get merged
@@ -88,6 +95,22 @@ Set "reviewReason" to a short explanation of what needs checking.
   "reviewReason": null
 }`;
 
+// Normalize special Unicode chars that PDF extraction sometimes produces
+function normalizeText(obj) {
+  if (typeof obj === "string") {
+    return obj
+      .replace(/\u2212/g, "-")   // Unicode minus sign → hyphen
+      .replace(/\u2013/g, "-")   // En dash → hyphen
+      .replace(/\u2014/g, "-")   // Em dash → hyphen
+      .replace(/\u00e2\u0088\u0092/g, "-"); // UTF-8 encoded minus artifact
+  }
+  if (Array.isArray(obj)) return obj.map(normalizeText);
+  if (obj && typeof obj === "object") {
+    return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, normalizeText(v)]));
+  }
+  return obj;
+}
+
 async function extractInvoiceData(pdfText) {
   const response = await getClient().chat.completions.create({
     model: "gpt-4o-mini",
@@ -99,7 +122,8 @@ async function extractInvoiceData(pdfText) {
     temperature: 0
   });
 
-  return JSON.parse(response.choices[0].message.content);
+  const parsed = JSON.parse(response.choices[0].message.content);
+  return normalizeText(parsed);
 }
 
 module.exports = { extractInvoiceData };
