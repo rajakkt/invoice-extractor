@@ -4,7 +4,6 @@ const path = require("path");
 const { extractText } = require("./extractPdf");
 const { extractInvoiceData } = require("./extractData");
 const { validateAmounts } = require("./validate");
-const { flattenForCsv } = require("./saveOutput");
 
 const INPUT_DIR = path.join(__dirname, "..", "input");
 const PROCESSED_DIR = path.join(__dirname, "..", "output", "processed");
@@ -12,11 +11,9 @@ const REVIEW_DIR = path.join(__dirname, "..", "output", "needs_review");
 const VALIDATION_FAILED_DIR = path.join(__dirname, "..", "output", "validation_failed");
 const SUMMARIES_DIR = path.join(__dirname, "..", "output", "daily_summaries");
 
-// Check if --validate flag was passed
 const shouldValidate = process.argv.includes("--validate");
 if (shouldValidate) console.log("✓ Validation enabled\n");
 
-// Get critical fields from .env or use defaults
 const criticalFieldsEnv = process.env.CRITICAL_CONFIDENCE_FIELDS || "invoiceNumber,totalAmount,vendor";
 const CRITICAL_CONFIDENCE_FIELDS = criticalFieldsEnv
   .split(",")
@@ -27,52 +24,36 @@ if (CRITICAL_CONFIDENCE_FIELDS.length === 0) {
   console.log("⚠ No critical confidence fields configured. All invoices will be processed without confidence checks.\n");
 }
 
-// Ensure all directories exist
 function ensureDirectoriesExist() {
   [INPUT_DIR, PROCESSED_DIR, REVIEW_DIR, VALIDATION_FAILED_DIR, SUMMARIES_DIR].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   });
 }
 
-function getTodayDateString() {
-  const now = new Date();
-  return now.toISOString().split("T")[0];
+function getTodayString() {
+  return new Date().toISOString().split("T")[0];
 }
 
 function isCriticalFieldsHighConfidence(data) {
-  // If no critical fields defined, always return true (accept all)
   if (CRITICAL_CONFIDENCE_FIELDS.length === 0) return true;
-
   for (const fieldName of CRITICAL_CONFIDENCE_FIELDS) {
-    const confidenceField = `${fieldName}_confidence`;
-    const confidence = data[confidenceField];
-    
-    if (confidence !== "high") {
-      return false;
-    }
+    if (data[`${fieldName}_confidence`] !== "high") return false;
   }
   return true;
 }
 
-function createReviewNote(data, reason = "confidence") {
+function createReviewNote(data, reason, validationResult = null) {
   const issues = [];
-  
+
   if (reason === "confidence") {
     for (const fieldName of CRITICAL_CONFIDENCE_FIELDS) {
-      const confidenceField = `${fieldName}_confidence`;
-      const confidence = data[confidenceField];
-      
-      if (confidence !== "high") {
-        issues.push(`  ⚠ ${fieldName}: ${confidence} confidence`);
-      }
+      const confidence = data[`${fieldName}_confidence`];
+      if (confidence !== "high") issues.push(`  ⚠ ${fieldName}: ${confidence} confidence`);
     }
     if (data.reviewReason) issues.push(`  📝 Note: ${data.reviewReason}`);
   } else if (reason === "validation") {
-    data.validationIssues?.forEach(issue => {
-      issues.push(`  ⚠ ${issue}`);
-    });
+    // FIX: was incorrectly reading data.validationIssues (doesn't exist)
+    (validationResult?.issues ?? []).forEach(issue => issues.push(`  ⚠ ${issue}`));
   }
 
   return `INVOICE FLAGGED FOR REVIEW
@@ -101,17 +82,14 @@ async function processInvoice(filePath, runResults) {
 
     const data = await extractInvoiceData(pdfText);
 
-    // Check critical fields confidence
     const isHighConfidence = isCriticalFieldsHighConfidence(data);
 
-    // Check validation if enabled
     let validationResult = null;
     if (shouldValidate && isHighConfidence) {
       validationResult = validateAmounts(data);
       data.validationResult = validationResult;
     }
 
-    // Determine routing
     let targetDir, status;
     if (!isHighConfidence) {
       targetDir = REVIEW_DIR;
@@ -129,23 +107,17 @@ async function processInvoice(filePath, runResults) {
       validationResult.issues.forEach(issue => console.log(`      • ${issue}`));
     }
 
-    // Save JSON
     const baseName = path.basename(filePath, ".pdf");
-    const jsonPath = path.join(targetDir, `${baseName}.json`);
-    fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), "utf8");
+    fs.writeFileSync(path.join(targetDir, `${baseName}.json`), JSON.stringify(data, null, 2), "utf8");
+    fs.copyFileSync(filePath, path.join(targetDir, fileName));
 
-    // Copy PDF
-    const pdfPath = path.join(targetDir, fileName);
-    fs.copyFileSync(filePath, pdfPath);
-
-    // Create review note if needed
     if (!isHighConfidence || (validationResult && !validationResult.valid)) {
       const reason = !isHighConfidence ? "confidence" : "validation";
-      const reviewNotePath = path.join(targetDir, `${baseName}_REVIEW_NOTE.txt`);
-      fs.writeFileSync(reviewNotePath, createReviewNote(data, reason), "utf8");
+      const note = createReviewNote(data, reason, validationResult);
+      fs.writeFileSync(path.join(targetDir, `${baseName}_REVIEW_NOTE.txt`), note, "utf8");
     }
 
-    // Delete from input
+    // FIX: always delete from input, even on partial success — delete AFTER all writes succeed
     fs.unlinkSync(filePath);
     console.log(`    ✓ Moved to ${path.basename(targetDir)}/ (removed from input)`);
 
@@ -154,23 +126,36 @@ async function processInvoice(filePath, runResults) {
       data,
       status: !isHighConfidence ? "needs_review" : (validationResult && !validationResult.valid) ? "validation_failed" : "processed"
     });
+
   } catch (err) {
     console.error(`    ❌ ERROR: ${err.message}`);
-    runResults.push({
-      fileName,
-      data: null,
-      status: "error",
-      error: err.message
-    });
+    // FIX: move errored PDF to needs_review so it doesn't loop forever in input
+    try {
+      const errorDest = path.join(REVIEW_DIR, fileName);
+      fs.copyFileSync(filePath, errorDest);
+      fs.unlinkSync(filePath);
+      const baseName = path.basename(filePath, ".pdf");
+      fs.writeFileSync(
+        path.join(REVIEW_DIR, `${baseName}_ERROR.txt`),
+        `PROCESSING ERROR\n=====================================\nFile: ${fileName}\nDate: ${new Date().toISOString()}\nError: ${err.message}\n\nThe PDF could not be processed automatically. Please review manually.\n`,
+        "utf8"
+      );
+      console.error(`    ↳ Moved to needs_review/ with error note`);
+    } catch (moveErr) {
+      console.error(`    ↳ Could not move to needs_review: ${moveErr.message}`);
+    }
+
+    runResults.push({ fileName, data: null, status: "error", error: err.message });
   }
 }
 
 function saveDailySummaryCSV(runResults) {
-  const today = getTodayDateString();
+  const today = getTodayString();
+  const now = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const csvPath = path.join(SUMMARIES_DIR, `invoices_${today}.csv`);
 
   const rows = runResults.map(r => {
-    if (!r.data) return { fileName: r.fileName, status: r.status, error: r.error };
+    if (!r.data) return { fileName: r.fileName, status: r.status, error: r.error ?? "" };
     return {
       fileName: r.fileName,
       invoiceNumber: r.data.invoiceNumber ?? "",
@@ -182,13 +167,15 @@ function saveDailySummaryCSV(runResults) {
       subtotal: r.data.subtotal ?? "",
       tax: r.data.tax ?? "",
       totalAmount: r.data.totalAmount ?? "",
+      purchaseOrderNumber: r.data.purchaseOrderNumber ?? "",
       invoiceNumber_confidence: r.data.invoiceNumber_confidence ?? "",
       totalAmount_confidence: r.data.totalAmount_confidence ?? "",
       vendor_confidence: r.data.vendor_confidence ?? "",
-      purchaseOrderNumber: r.data.purchaseOrderNumber ?? "",
+      purchaseOrderNumber_confidence: r.data.purchaseOrderNumber_confidence ?? "",
       trackingNumber: r.data.trackingNumber ?? "",
       validationPassed: r.data.validationResult ? r.data.validationResult.valid : "n/a",
-      status: r.status
+      status: r.status,
+      error: ""
     };
   });
 
@@ -196,12 +183,17 @@ function saveDailySummaryCSV(runResults) {
 
   const headers = Object.keys(rows[0]);
   const escape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const csvLines = [
-    headers.map(escape).join(","),
-    ...rows.map((row) => headers.map((h) => escape(row[h])).join(","))
-  ];
 
-  fs.writeFileSync(csvPath, csvLines.join("\n") + "\n", "utf8");
+  // FIX: append to existing CSV instead of overwriting — multiple runs same day accumulate
+  const newRows = rows.map(row => headers.map(h => escape(row[h])).join(",")).join("\n") + "\n";
+
+  if (fs.existsSync(csvPath)) {
+    fs.appendFileSync(csvPath, newRows, "utf8");
+  } else {
+    const header = headers.map(escape).join(",") + "\n";
+    fs.writeFileSync(csvPath, header + newRows, "utf8");
+  }
+
   console.log(`\n📊 Daily summary saved: ${csvPath}`);
 }
 
@@ -213,7 +205,7 @@ async function main() {
     process.exit(1);
   }
 
-  const files = fs.readdirSync(INPUT_DIR).filter((f) => f.toLowerCase().endsWith(".pdf"));
+  const files = fs.readdirSync(INPUT_DIR).filter(f => f.toLowerCase().endsWith(".pdf"));
 
   if (files.length === 0) {
     console.log("No PDF files in input/ folder");
