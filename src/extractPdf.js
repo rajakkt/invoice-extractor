@@ -1,6 +1,15 @@
 ﻿const fs = require("fs");
 const path = require("path");
 
+// pdfjs-dist emits font-related warnings to stderr that are irrelevant for text extraction.
+// Filter them out so the CLI output stays clean.
+const _stderrWrite = process.stderr.write.bind(process.stderr);
+process.stderr.write = function (chunk, ...args) {
+  const s = typeof chunk === "string" ? chunk : chunk.toString();
+  if (s.includes("standardFontDataUrl") || s.includes("Unable to load font data")) return true;
+  return _stderrWrite(chunk, ...args);
+};
+
 const MAX_CHARS = 12000;
 const HEAD_CHARS = 8000;
 const TAIL_CHARS = 4000;
