@@ -18,7 +18,7 @@ AI-powered invoice PDF extractor using GitHub Models (gpt-4o-mini) with **positi
 - **Daily Summaries**: Timestamped CSV reports, appends across multiple runs per day
 - **No Database Required**: File-based workflow — folder structure is the state machine
 - **Audit Trail**: PDF + JSON pairs saved together, REVIEW_NOTE.txt for flagged invoices
-- **Cost-Effective**: Uses GitHub Models free tier (~$0 cost for typical volumes)
+- **GitHub Models Free Tier**: Uses GPT-4o on GitHub Models free tier (~- **Cost-Effective**: Uses GitHub Models free tier (~$0 cost for typical volumes) for typical volumes on free tier)
 
 ## Setup
 
@@ -201,35 +201,27 @@ Each invoice JSON contains:
 
 ## How Extraction Works
 
-### Step 1 — Positional PDF Extraction
+### Step 1 - Render PDF Pages to Images
 
-`pdfjs-dist` extracts each text element with its (x, y) coordinates on the page. The extractor:
-- Groups text items that share the same Y position (within a 3-unit tolerance) into a single row
-- Sorts each row left-to-right by X coordinate
-- Reconstructs rows: items separated by a large gap get a tab separator → `Invoice Date:\t16-Jun-25`
-- Produces clean, structured text where labels and values always appear on the same line
-- Long PDFs (>12,000 chars) are truncated: first 8,000 + last 4,000 chars
+`pdfjs-dist` renders each PDF page to a PNG image at 2x scale (~150 DPI). Images are automatically scaled down if they exceed 4 MB. Multi-page invoices produce one image per page, all sent together.
 
-**Why this matters:** The old approach (pdf-parse) extracted raw text in PDF stream order — two-column layouts would often dump all labels first, then all values, or vice versa, forcing the AI to match them by positional ordering. With coordinate-aware extraction, the AI sees `Purchase Order:\t253439-00` on a single line and simply reads the value.
+### Step 2 - GPT-4o Vision Extraction
 
-### Step 2 — AI Extraction (gpt-4o-mini)
+All page images are sent to GPT-4o in a single API call. GPT-4o reads the visual layout -- tables, column alignment, bold headers, indented fields -- exactly as a human would. The system prompt is minimal since GPT-4o handles layout natively:
+- `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO -- always different
+- `invoiceDate` = issue date, not ship date or order date
+- Confidence rules: null/empty fields always get `low` confidence
 
-The cleaned text is sent to the AI with a detailed system prompt covering:
-
-- **Field disambiguation**: `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO — always different
-- **Field disambiguation**: `invoiceNumber` = seller's ID, `purchaseOrderNumber` = buyer's PO — always different
-- **Confidence rules**: null/empty fields always get `low` confidence, not `high`
-
-### Step 3 — Deterministic Post-processing
+### Step 3 - Deterministic Post-processing
 
 Code checks that don't need AI:
 - If `invoiceNumber === purchaseOrderNumber`, the PO is set to `null/low` (known AI misread pattern)
 
-### Step 4 — Retry Low-Confidence Fields
+### Step 4 - Retry Low-Confidence Fields
 
-If any critical field (from `CRITICAL_CONFIDENCE_FIELDS`) comes back with less than `high` confidence, a second focused AI call is made for only those fields. The retry prompt gives specific guidance about the field. If the retry returns `high` confidence, the result is merged in. If not, the invoice routes to `needs_review/` as normal.
+If any critical field comes back with less than `high` confidence, a second focused GPT-4o vision call is made for only those fields. If the retry returns `high` confidence, the result is merged in. If not, the invoice routes to `needs_review/`.
 
-## Confidence Scoring
+## Confidence Scoring## Confidence Scoring
 
 | Level | Meaning |
 |---|---|
@@ -284,19 +276,38 @@ Next Steps:
 
 To approve: fix the JSON if needed, then move the folder to `processed/`.
 
+## Version Comparison
+
+Three branches are available, each using a different approach to extraction:
+
+| | `main` (v1) | `v2-positional` | `v3-vision` (this branch) |
+|---|---|---|---|
+| **PDF extraction** | pdf-parse (raw text) | pdfjs-dist (x,y coords) | pdfjs-dist (render to PNG) |
+| **AI model** | gpt-4o-mini | gpt-4o-mini | **gpt-4o** (vision) |
+| **Reads layout** | Flat text stream | Reconstructs rows via coords | Sees it visually |
+| **Two-column PDFs** | Prompt workarounds needed | Tab-separated rows | Native visual understanding |
+| **Table columns** | May merge (e.g. `1193.99193.99`) | Preserved via X coords | Reads table cells directly |
+| **Scanned PDFs** | No (empty text) | No (empty text) | Yes |
+| **Prompt complexity** | High (5 rule sections) | Medium | Minimal |
+| **Accuracy** | Good | Better | Best |
+
 ## Cost
 
-**GitHub Models Free Tier:** ~150 requests/day, ~250,000 tokens/day, $0 cost
+| | `main` (v1) | `v2-positional` | `v3-vision` (this branch) |
+|---|---|---|---|
+| **GitHub Models free tier** | ~150 req/day | ~150 req/day | ~150 req/day |
+| **Cost on free tier** | $0 | $0 | $0 |
+| **API calls per invoice** | 1-2 | 1-2 | 1-2 |
+| **Tokens per invoice** | ~3k-8k tokens | ~3k-8k tokens | ~1k tokens + image |
+| **Cost if paid (per invoice)** | ~$0.001 | ~$0.001 | ~$0.01-0.03 |
 
-**Typical usage per invoice:**
-- Normal invoice: 1 API call (~3,000–4,000 tokens)
-- Invoice with low-confidence retry: 2 API calls (~6,000–8,000 tokens)
+> **Free tier is sufficient** for typical AP automation volumes. If you exceed it, GPT-4o vision charges per image -- roughly $0.002-0.006 per page image. A 3-page invoice costs ~$0.01-0.02. GPT-4o-mini text (v1/v2) is ~10-20x cheaper per call but less accurate on complex layouts.
 
-## Limitations
+## Limitations## Limitations
 
-- Large PDFs (>12,000 chars after cleaning) are truncated — very long invoices may lose mid-section line items
+
 - AI confidence scoring is AI-based judgment, not a formal algorithm
-- `pdfjs-dist` cannot handle scanned/image-based PDFs (image PDFs return empty text — a vision API fallback would be needed)
+- Very long PDFs (many pages) will take longer and use more image tokens
 
 ## Next Steps
 
@@ -313,7 +324,7 @@ To approve: fix the JSON if needed, then move the folder to `processed/`.
 | `Long PDF truncated` | Normal — first 8k + last 4k chars kept |
 | Invoice goes to `needs_review` unexpectedly | Check REVIEW_NOTE.txt to see which critical field failed |
 | Validation fails on valid invoice | Check REVIEW_NOTE.txt for math details; adjust `TOLERANCE` in `.env` |
-| Extraction returns empty text | PDF may be scanned/image-based — not supported by pdf-parse |
+| Extraction returns empty text | PDF may be encrypted or corrupted — check the file opens normally in a PDF viewer |
 
 ## License
 
